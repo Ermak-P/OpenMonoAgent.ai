@@ -377,7 +377,7 @@ public sealed class OpenAiCompatClient : ILlmClient, IDisposable
                         function = new { name = tc.Name, arguments = tc.Arguments }
                     })
                 },
-            MessageRole.Assistant => new { role = "assistant", content = m.Content },
+            MessageRole.Assistant => new { role = "assistant", content = m.Content ?? "" },
             MessageRole.Tool => (object)new
             {
                 role = "tool",
