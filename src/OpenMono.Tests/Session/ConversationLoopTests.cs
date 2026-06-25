@@ -171,6 +171,29 @@ public class ConversationLoopTests
             .Should().Contain(m => m.Content != null && m.Content.Contains("Doom loop detected"));
     }
 
+    [Fact]
+    public async Task RunTurn_EmptyLlmResponse_DoesNotAddNullAssistantMessage()
+    {
+        // LLM returns a single IsComplete=true chunk with no text or tool calls
+        var llm = new FakeLlmClient([
+            new StreamChunk { IsComplete = true },
+        ]);
+
+        var session = new SessionState();
+        session.AddMessage(new Message { Role = MessageRole.System, Content = "System" });
+
+        var renderer = new TerminalRenderer();
+        var config = new AppConfig();
+        var loop = new ConversationLoop(llm, new ToolRegistry(), new PermissionEngine(config, renderer, renderer),
+            renderer, renderer, renderer, config, session);
+
+        await loop.RunTurnAsync("hello", null, CancellationToken.None);
+
+        // Only system + user messages should be present — no null-content assistant message
+        session.Messages.Should().NotContain(m =>
+            m.Role == MessageRole.Assistant && m.Content == null && m.ToolCalls == null);
+    }
+
     private sealed class FakeLlmClient : ILlmClient
     {
         private readonly List<List<StreamChunk>> _rounds;
