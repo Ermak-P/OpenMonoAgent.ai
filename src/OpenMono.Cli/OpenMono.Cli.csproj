@@ -7,6 +7,10 @@
     <PublishAot>false</PublishAot>
     <InvariantGlobalization>false</InvariantGlobalization>
     <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <!-- Enumerate all supported RIDs so that
+         `dotnet publish -r <rid> --self-contained` works for each platform.
+         Example: dotnet publish -r win-x64 --self-contained -o out/win -->
+    <RuntimeIdentifiers>linux-x64;linux-arm64;osx-x64;osx-arm64;win-x64;win-arm64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

@@ -77,10 +77,15 @@ public sealed class HookRunner
 
         try
         {
+            // Use the platform-appropriate shell so hooks work on Windows and Unix.
+            var (shell, shellFlag) = OperatingSystem.IsWindows()
+                ? ("cmd.exe", "/c")
+                : ("/bin/bash", "-c");
+
             var psi = new ProcessStartInfo
             {
-                FileName = "/bin/bash",
-                ArgumentList = { "-c", command },
+                FileName = shell,
+                ArgumentList = { shellFlag, command },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

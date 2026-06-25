@@ -72,6 +72,34 @@ public sealed class BashTool : ToolBase
         };
     }
 
+    /// <summary>Returns the shell executable and the argument prefix for the current platform.</summary>
+    /// <remarks>
+    /// On Windows the agent uses <c>cmd.exe /c</c> so that commands typed by the user in
+    /// Windows-style syntax work out of the box.  On Unix the original <c>/bin/bash -c</c>
+    /// behaviour is preserved.
+    /// </remarks>
+    internal static (string Shell, string ShellFlag) GetPlatformShell()
+        => OperatingSystem.IsWindows()
+            ? ("cmd.exe", "/c")
+            : ("/bin/bash", "-c");
+
+    private static void ApplyShellEnvironment(ProcessStartInfo psi)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // On Windows HOME is not a standard variable; USERPROFILE is canonical.
+            var userProfile = Environment.GetEnvironmentVariable("USERPROFILE")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            psi.Environment["HOME"] = userProfile;
+            psi.Environment["USERPROFILE"] = userProfile;
+        }
+        else
+        {
+            psi.Environment["HOME"] = Environment.GetEnvironmentVariable("HOME") ?? "/root";
+            psi.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? "/usr/local/bin:/usr/bin:/bin";
+        }
+    }
+
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var command = input.GetProperty("command").GetString()!;
@@ -85,10 +113,11 @@ public sealed class BashTool : ToolBase
         if (timeoutMs <= 0) timeoutMs = 120_000;
         timeoutMs = Math.Min(timeoutMs, 600_000);
 
+        var (shell, shellFlag) = GetPlatformShell();
         var psi = new ProcessStartInfo
         {
-            FileName = "/bin/bash",
-            ArgumentList = { "-c", command },
+            FileName = shell,
+            ArgumentList = { shellFlag, command },
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -96,8 +125,7 @@ public sealed class BashTool : ToolBase
             WorkingDirectory = context.WorkingDirectory,
         };
 
-        psi.Environment["HOME"] = Environment.GetEnvironmentVariable("HOME") ?? "/root";
-        psi.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? "/usr/local/bin:/usr/bin:/bin";
+        ApplyShellEnvironment(psi);
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeoutMs);
@@ -177,7 +205,11 @@ public sealed class BashTool : ToolBase
 
     private static ToolResult RunBackground(string command, ToolContext context)
     {
-        var home = Environment.GetEnvironmentVariable("HOME") ?? "/root";
+        var home = OperatingSystem.IsWindows()
+            ? (Environment.GetEnvironmentVariable("USERPROFILE")
+               ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
+            : (Environment.GetEnvironmentVariable("HOME") ?? "/root");
+
         var bgDir = Path.Combine(home, ".openmono", "bg");
         try { Directory.CreateDirectory(bgDir); }
         catch (Exception ex)
@@ -188,21 +220,32 @@ public sealed class BashTool : ToolBase
         var logName = $"bg-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}.log";
         var logPath = Path.Combine(bgDir, logName);
 
-        var wrapped = $"exec >>'{logPath}' 2>&1; {command}";
+        // Create the log file up-front so readers can tail it immediately.
+        try { File.WriteAllText(logPath, string.Empty); }
+        catch (Exception ex)
+        {
+            return ToolResult.Error($"Failed to create log file {logPath}: {ex.Message}");
+        }
+
+        var (shell, shellFlag) = GetPlatformShell();
 
         var psi = new ProcessStartInfo
         {
-            FileName = "/bin/bash",
-            ArgumentList = { "-c", wrapped },
+            FileName = shell,
             RedirectStandardInput = false,
-            RedirectStandardOutput = false,
-            RedirectStandardError = false,
+            // Redirect output so we can pipe it to the log file from managed code —
+            // this avoids bash-specific shell redirection syntax (exec >>... 2>&1)
+            // and works identically on Windows and Unix.
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = context.WorkingDirectory,
         };
-        psi.Environment["HOME"] = home;
-        psi.Environment["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? "/usr/local/bin:/usr/bin:/bin";
+        psi.ArgumentList.Add(shellFlag);
+        psi.ArgumentList.Add(command);
+
+        ApplyShellEnvironment(psi);
 
         Process? process;
         try
@@ -218,16 +261,56 @@ public sealed class BashTool : ToolBase
 
         var pid = process.Id;
 
+        // Fire-and-forget tasks that drain stdout/stderr into the log file.
+        // Both use FileMode.Append + FileShare.ReadWrite so they interleave
+        // safely and external readers can follow the file while it grows.
+        _ = PipeStreamToFileAsync(process.StandardOutput, logPath);
+        _ = PipeStreamToFileAsync(process.StandardError, logPath);
+
+        string killHint = OperatingSystem.IsWindows()
+            ? $"  taskkill /PID {pid}      # stop the process\n" +
+              $"  taskkill /F /PID {pid}   # force-kill if the process won't stop\n"
+            : $"  kill {pid}             # stop the process\n" +
+              $"  kill -9 {pid}          # force-kill if the process won't stop\n";
+
+        string tailHint = OperatingSystem.IsWindows()
+            ? $"  Get-Content -Tail 50 '{logPath}'   # peek at output\n" +
+              $"  Get-Content -Wait '{logPath}'       # stream output\n"
+            : $"  tail -n 50 {logPath}   # peek at output\n" +
+              $"  tail -f {logPath}      # stream output (avoid in agent — use sleep+tail -n instead)\n";
+
         var summary =
             $"Started in background — PID {pid}\n" +
             $"Log: {logPath}\n" +
             "\n" +
-            "Follow-ups (run foreground):\n" +
-            $"  tail -n 50 {logPath}   # peek at output\n" +
-            $"  tail -f {logPath}      # stream output (avoid in agent — use sleep+tail -n instead)\n" +
-            $"  kill {pid}             # stop the process\n" +
-            $"  kill -9 {pid}          # force-kill if the process won't stop\n";
+            "Follow-ups:\n" +
+            tailHint +
+            killHint;
         return ToolResult.Success(summary);
+    }
+
+    /// <summary>
+    /// Drains <paramref name="reader"/> line-by-line into <paramref name="logPath"/>,
+    /// appending to the file so that stdout and stderr interleave naturally.
+    /// Runs as a background task — exceptions are swallowed intentionally.
+    /// </summary>
+    private static async Task PipeStreamToFileAsync(StreamReader reader, string logPath)
+    {
+        try
+        {
+            await using var fs = new FileStream(
+                logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            await using var writer = new StreamWriter(fs) { AutoFlush = true };
+
+            string? line;
+            while ((line = await reader.ReadLineAsync()) is not null)
+                await writer.WriteLineAsync(line);
+        }
+        catch
+        {
+            // Background log task — swallow all errors so they don't surface
+            // as unobserved task exceptions.
+        }
     }
 
     private static async Task KillProcessTreeAsync(Process process)

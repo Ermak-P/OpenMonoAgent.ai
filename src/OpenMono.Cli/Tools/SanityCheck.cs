@@ -13,22 +13,42 @@ public static class SanityCheck
         "> /dev/sda",
     ];
 
+    // Windows-specific dangerous patterns checked when running on Windows.
+    private static readonly string[] WindowsDestructivePatterns =
+    [
+        "format c:",
+        "format c /",
+        "del /f /s /q c:\\",
+        "rd /s /q c:\\",
+        "rmdir /s /q c:\\",
+        "cipher /w:c",
+        "sfc /scannow",        // SFC writes to system; requires elevation — block proactively.
+    ];
+
     private static readonly string[] ProcessSubstitutionPatterns = [">(", "<(", "=("];
 
     private static readonly string[] ProtectedSystemPaths =
-    [
-        "/etc/",
-        "/usr/bin/",
-        "/usr/sbin/",
-        "/sbin/",
-        "/bin/",
-        "/boot/",
-        "/sys/",
-        "/proc/",
-        "/dev/",
-        "/system/",
-        "/library/",
-    ];
+        OperatingSystem.IsWindows()
+        ? [
+            // Windows system directories — forward-slash form matches the normalised path.
+            "c:/windows/",
+            "c:/program files/",
+            "c:/program files (x86)/",
+            "c:/programdata/",
+          ]
+        : [
+            "/etc/",
+            "/usr/bin/",
+            "/usr/sbin/",
+            "/sbin/",
+            "/bin/",
+            "/boot/",
+            "/sys/",
+            "/proc/",
+            "/dev/",
+            "/system/",
+            "/library/",
+          ];
 
     public static string? Check(string toolName, JsonElement input, string workingDirectory)
     {
@@ -45,6 +65,10 @@ public static class SanityCheck
         var normalized = command.Trim().ToLowerInvariant();
 
         if (QuickDestructivePatterns.Any(p => normalized.Contains(p, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        if (OperatingSystem.IsWindows() &&
+            WindowsDestructivePatterns.Any(p => normalized.Contains(p, StringComparison.OrdinalIgnoreCase)))
             return true;
 
         var parseResult = BashParser.Parse(command);
@@ -81,11 +105,24 @@ public static class SanityCheck
                 return $"SanityCheck refused Bash: Destructive pattern detected ({pattern}). Command: {Truncate(command, 200)}";
         }
 
-        foreach (var pattern in ProcessSubstitutionPatterns)
+        if (OperatingSystem.IsWindows())
         {
-            if (command.Contains(pattern, StringComparison.Ordinal))
-                return $"SanityCheck refused Bash: process substitution '{pattern}' executes hidden subcommands " +
-                       "that bypass file access checks. Use explicit pipelines instead.";
+            foreach (var pattern in WindowsDestructivePatterns)
+            {
+                if (normalized.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                    return $"SanityCheck refused Bash: Destructive Windows pattern detected ({pattern}). Command: {Truncate(command, 200)}";
+            }
+        }
+
+        // Process substitution is a Unix bash-only concept — skip this check on Windows.
+        if (!OperatingSystem.IsWindows())
+        {
+            foreach (var pattern in ProcessSubstitutionPatterns)
+            {
+                if (command.Contains(pattern, StringComparison.Ordinal))
+                    return $"SanityCheck refused Bash: process substitution '{pattern}' executes hidden subcommands " +
+                           "that bypass file access checks. Use explicit pipelines instead.";
+            }
         }
 
         var parseResult = BashParser.Parse(command);
