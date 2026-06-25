@@ -353,7 +353,8 @@ public sealed class ConversationLoop : IDisposable
                 Content = textBuffer.Length > 0 ? textBuffer.ToString() : null,
                 ToolCalls = toolCalls.Count > 0 ? toolCalls : null,
             };
-            _session.AddMessage(assistantMsg);
+            if (assistantMsg.Content is not null || assistantMsg.ToolCalls is not null)
+                _session.AddMessage(assistantMsg);
 
             if (toolCalls.Count == 0)
             {

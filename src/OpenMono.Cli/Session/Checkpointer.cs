@@ -112,17 +112,12 @@ public sealed class Checkpointer
         var system = session.Messages.Where(m => m.Role == MessageRole.System).ToList();
         var recent = session.Messages.Skip(latest.CutoffMessageIndex).ToList();
 
-        var window = new List<Message>(system.Count + 2 + recent.Count);
+        var window = new List<Message>(system.Count + 1 + recent.Count);
         window.AddRange(system);
         window.Add(new Message
         {
-            Role = MessageRole.User,
+            Role = MessageRole.System,
             Content = $"[Checkpoint #{session.Checkpoints.Count} — {latest.CreatedAt:yyyy-MM-dd HH:mm} UTC, turn {latest.TurnIndex}]\n\n{latest.Summary}",
-        });
-        window.Add(new Message
-        {
-            Role = MessageRole.Assistant,
-            Content = "Understood. I have the full context from the checkpoint. Continuing from where we left off.",
         });
         window.AddRange(recent);
         return window;

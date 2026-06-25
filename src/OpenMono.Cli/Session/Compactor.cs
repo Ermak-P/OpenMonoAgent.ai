@@ -89,14 +89,8 @@ public sealed class Compactor
 
         compacted.AddMessage(new Message
         {
-            Role = MessageRole.User,
+            Role = MessageRole.System,
             Content = $"[Conversation summary — {toSummarize.Count} messages compacted, {evictedCount} large tool outputs evicted]\n\n{formatted}",
-        });
-
-        compacted.AddMessage(new Message
-        {
-            Role = MessageRole.Assistant,
-            Content = "Understood. I have the context from the summarized conversation. Continuing from where we left off.",
         });
 
         foreach (var msg in recentTurns)
