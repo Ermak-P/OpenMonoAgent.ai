@@ -10,35 +10,68 @@ using OpenMono.Utils;
 
 namespace OpenMono.Tools;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+/// <summary>
+/// Выполняет инструменты локально, обеспечивая проверку схем, разрешений, хуков и кэширования.
+/// </summary>
 public sealed class LocalToolExecutor : IToolExecutor
 {
+    /// <summary>
+    /// Журнал хода, в который записываются этапы обработки вызова инструмента.
+    /// </summary>
     private readonly TurnJournal _journal;
+
+    /// <summary>
+    /// Выходной канал для отображения статуса выполнения инструмента.
+    /// </summary>
     private readonly IOutputSink _output;
+
+    /// <summary>
+    /// Конфигурация приложения, включая рабочий каталог.
+    /// </summary>
     private readonly AppConfig _config;
+
+    /// <summary>
+    /// Состояние текущей сессии.
+    /// </summary>
     private readonly SessionState _session;
+
+    /// <summary>
+    /// Компонент проверки разрешений и возможностей инструмента.
+    /// </summary>
     private readonly PermissionEngine _permissions;
+
+    /// <summary>
+    /// Кэш результатов для повторяемых вызовов инструментов только на чтение.
+    /// </summary>
     private readonly ToolResultCache _cache;
+
+    /// <summary>
+    /// Хранилище артефактов для крупных результатов инструментов.
+    /// </summary>
     private readonly ArtifactStore _artifactStore;
+
+    /// <summary>
+    /// Исполнитель хуков до и после вызова инструмента.
+    /// </summary>
     private readonly HookRunner _hookRunner;
+
+    /// <summary>
+    /// Необязательный приемник ACP-событий для телеметрии вызовов инструментов.
+    /// </summary>
     private readonly IAcpEventSink? _sink;
 
+    /// <summary>
+    /// Инициализирует новый экземпляр <see cref="LocalToolExecutor"/>.
+    /// </summary>
+    /// <param name="journal">Журнал текущего хода.</param>
+    /// <param name="output">Выходной канал для пользовательских сообщений.</param>
+    /// <param name="config">Конфигурация приложения.</param>
+    /// <param name="session">Состояние текущей сессии.</param>
+    /// <param name="permissions">Движок проверки разрешений.</param>
+    /// <param name="cache">Кэш результатов инструментов.</param>
+    /// <param name="artifactStore">Хранилище артефактов крупных результатов.</param>
+    /// <param name="hookRunner">Исполнитель хуков вокруг вызова инструмента.</param>
+    /// <param name="sink">Необязательный приемник ACP-событий.</param>
     public LocalToolExecutor(
         TurnJournal journal,
         IOutputSink output,
@@ -61,6 +94,17 @@ public sealed class LocalToolExecutor : IToolExecutor
         _sink = sink;
     }
 
+    /// <summary>
+    /// Выполняет один вызов инструмента с полной цепочкой валидации, авторизации и постобработки.
+    /// </summary>
+    /// <param name="call">Описание вызова инструмента.</param>
+    /// <param name="tool">Экземпляр инструмента или <see langword="null"/>, если инструмент не зарегистрирован.</param>
+    /// <param name="ctx">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат выполнения инструмента.</returns>
+    /// <remarks>
+    /// Метод учитывает режим планирования, запускает pre/post hooks, пишет телеметрию и инвалидирует связанные кэши после операций записи.
+    /// </remarks>
     public async Task<ToolResult> ExecuteAsync(ToolCall call, ITool? tool, ToolContext ctx, CancellationToken ct)
     {
         if (tool is null)
@@ -102,6 +146,7 @@ public sealed class LocalToolExecutor : IToolExecutor
 
         if (_session.Meta.PlanMode && !tool.IsReadOnly)
         {
+            // В режиме планирования запрещаем любые записи, чтобы агент сначала согласовал подход.
             var planModeError = $"Plan mode is active — investigate and write a plan, do not edit files. " +
                                 $"Call ExitPlanMode with your completed plan to resume, then retry {call.Name}.";
             _journal.RecordPermissionDecided(call.Id, false, "plan_mode_active");
@@ -138,10 +183,9 @@ public sealed class LocalToolExecutor : IToolExecutor
         }
         _journal.RecordPermissionDecided(call.Id, true);
 
-
-
         if (tool.IsReadOnly && _cache.TryGet(call.Name, input, out var cachedResult) && cachedResult is not null)
         {
+            // Для инструментов только на чтение возвращаем кэшированный результат без повторного запуска.
             _journal.RecordToolStarted(call.Id);
             _journal.RecordToolCompleted(call.Id, cachedResult.Class, cachedResult.Artifacts.Select(a => a.Id).ToList());
             _output.WriteToolStart(call.Name, call.Arguments);
@@ -175,6 +219,7 @@ public sealed class LocalToolExecutor : IToolExecutor
 
             if (result.Class == ResultClass.Success && result.ModelPreview.Length > _artifactStore.LargeOutputThreshold)
             {
+                // Крупный вывод переносится в артефакт, чтобы не перегружать основной канал ответа.
                 result = _artifactStore.PersistAndReplace(result, call.Name);
                 Log.Debug($"Tool output persisted as artifact: {call.Name}");
             }
@@ -189,6 +234,7 @@ public sealed class LocalToolExecutor : IToolExecutor
                 if (input.TryGetProperty("file_path", out var pathEl) && pathEl.GetString() is { } filePath)
                 {
                     var resolvedPath = Path.GetFullPath(filePath, _config.WorkingDirectory);
+                    // После записи сбрасываем все кэши, завязанные на конкретный файл.
                     _cache.InvalidatePath(resolvedPath);
                     FileReadTool.InvalidateCache(resolvedPath);
                 }
@@ -205,7 +251,6 @@ public sealed class LocalToolExecutor : IToolExecutor
             else
             {
                 _output.WriteToolSuccess(call.Name);
-
 
                 if (result.Diff is not null)
                     _output.WriteToolDiff(result.Diff);
@@ -242,11 +287,11 @@ public sealed class LocalToolExecutor : IToolExecutor
         return result;
     }
 
-
-
-
-
-
+    /// <summary>
+    /// Подготавливает короткое однострочное представление аргументов для логов и телеметрии.
+    /// </summary>
+    /// <param name="arguments">Исходная строка JSON-аргументов.</param>
+    /// <returns>Усеченная и нормализованная строка аргументов.</returns>
     internal static string SummarizeToolArgs(string arguments)
     {
         if (string.IsNullOrEmpty(arguments)) return "";
@@ -254,6 +299,7 @@ public sealed class LocalToolExecutor : IToolExecutor
         if (trimmed.Length == 0) return "";
         var snippet = trimmed.Length <= 120 ? trimmed.ToString() : trimmed[..120].ToString() + "...";
 
+        // Переводим многострочный JSON в компактный фрагмент, удобный для логирования.
         return string.Join(" ", snippet.Split(new[] { '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries));
     }
 }

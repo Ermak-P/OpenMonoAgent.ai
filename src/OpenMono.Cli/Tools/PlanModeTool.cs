@@ -3,9 +3,19 @@ using OpenMono.Session;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Включает режим планирования, в котором агент должен сначала подготовить план действий.
+/// </summary>
 public sealed class EnterPlanModeTool : ToolBase
 {
+    /// <summary>
+    /// Получает имя инструмента.
+    /// </summary>
     public override string Name => "EnterPlanMode";
+
+    /// <summary>
+    /// Получает описание назначения инструмента.
+    /// </summary>
     public override string Description =>
         """
         Use this tool proactively before starting any non-trivial implementation task.
@@ -43,14 +53,31 @@ public sealed class EnterPlanModeTool : ToolBase
           "What files handle routing?" — this is research, not implementation
         """;
 
+    /// <summary>
+    /// Получает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
+    /// <summary>
+    /// Получает признак того, что инструмент не изменяет проектные файлы.
+    /// </summary>
     public override bool IsReadOnly => true;
 
+    /// <summary>
+    /// Описывает схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы для причины входа в режим планирования.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("reason", "Why you are entering plan mode — what task are you planning?")
         .Require("reason");
 
+    /// <summary>
+    /// Активирует режим планирования для текущей сессии.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат активации режима планирования.</returns>
     protected override Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var reason = input.GetProperty("reason").GetString()!;
@@ -64,9 +91,19 @@ public sealed class EnterPlanModeTool : ToolBase
     }
 }
 
+/// <summary>
+/// Выключает режим планирования и сохраняет подготовленный план в состоянии сессии.
+/// </summary>
 public sealed class ExitPlanModeTool : ToolBase
 {
+    /// <summary>
+    /// Получает имя инструмента.
+    /// </summary>
     public override string Name => "ExitPlanMode";
+
+    /// <summary>
+    /// Получает описание назначения инструмента.
+    /// </summary>
     public override string Description =>
         """
         Exit plan mode and present the implementation plan to the user for approval.
@@ -76,15 +113,31 @@ public sealed class ExitPlanModeTool : ToolBase
         It should list: the approach, every file that changes, risks, and complexity.
         """;
 
+    /// <summary>
+    /// Получает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
-
+    /// <summary>
+    /// Получает признак того, что инструмент не изменяет проектные файлы.
+    /// </summary>
     public override bool IsReadOnly => true;
 
+    /// <summary>
+    /// Описывает схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы для плана реализации.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("plan", "The full numbered implementation plan to present to the user")
         .Require("plan");
 
+    /// <summary>
+    /// Завершает режим планирования и публикует сформированный план в выводе сессии.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат завершения режима планирования с разрывом хода.</returns>
     protected override Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var plan = input.GetProperty("plan").GetString()!;
@@ -97,6 +150,7 @@ public sealed class ExitPlanModeTool : ToolBase
         context.Session.Meta.PlanMode = false;
         context.Session.Meta.LastPlan = plan;
 
+        // План дублируется в выводе, чтобы пользователь увидел его вне структурированного результата инструмента.
         context.WriteOutput($"\n## Plan\n\n{plan}\n");
 
         return Task.FromResult(ToolResult.Success(

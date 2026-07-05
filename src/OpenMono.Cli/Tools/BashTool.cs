@@ -4,9 +4,19 @@ using OpenMono.Permissions;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Выполняет shell-команды в рабочем каталоге текущей сессии.
+/// </summary>
 public sealed class BashTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "Bash";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description =>
         "Execute a shell command. The working directory persists between calls. " +
         "Use for git, build tools, and other system operations. " +
@@ -15,12 +25,21 @@ public sealed class BashTool : ToolBase
         "detached, writes stdout+stderr to a log file under ~/.openmono/bg/, and returns " +
         "the PID immediately so the conversation can continue.";
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddProperty("command", new { type = "string", minLength = 1, description = "The bash command to execute" })
         .AddInteger("timeout_ms", "Timeout in milliseconds (default: 120000, max: 600000). Ignored when background=true.", minimum: 1, maximum: 600000)
         .AddBoolean("background", "If true, launch the process detached, write stdout+stderr to a log file under ~/.openmono/bg/, and return the PID + log path immediately. Use for servers, watchers, or anything that never exits on its own.")
         .Require("command");
 
+    /// <summary>
+    /// Определяет требуемый уровень разрешений для указанной команды.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Уровень разрешений для выполнения команды.</returns>
     public override PermissionLevel RequiredPermission(JsonElement input)
     {
         var command = input.GetProperty("command").GetString() ?? "";
@@ -28,6 +47,11 @@ public sealed class BashTool : ToolBase
         return SanityCheck.IsDestructiveCommand(command) ? PermissionLevel.Deny : PermissionLevel.Ask;
     }
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для выполнения shell-команды.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Список требуемых возможностей.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var command = input.TryGetProperty("command", out var cmd) ? cmd.GetString() : null;
@@ -47,6 +71,11 @@ public sealed class BashTool : ToolBase
         return caps;
     }
 
+    /// <summary>
+    /// Определяет, изменяет ли сегмент команды состояние системы контроля версий.
+    /// </summary>
+    /// <param name="seg">Сегмент команды для анализа.</param>
+    /// <returns>Описание мутации VCS или <see langword="null" />, если изменений нет.</returns>
     private static VcsMutationCap? DetectVcsMutation(CommandSegment seg)
     {
         if (!seg.Binary.Equals("git", StringComparison.OrdinalIgnoreCase))
@@ -72,6 +101,17 @@ public sealed class BashTool : ToolBase
         };
     }
 
+    /// <summary>
+    /// Выполняет команду в foreground- или background-режиме.
+    /// </summary>
+    /// <param name="input">JSON с командой, таймаутом и режимом запуска.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат выполнения команды.</returns>
+    /// <remarks>
+    /// В foreground-режиме метод собирает stdout и stderr, а при истечении таймаута
+    /// завершает все дерево процессов.
+    /// </remarks>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var command = input.GetProperty("command").GetString()!;
@@ -127,7 +167,8 @@ public sealed class BashTool : ToolBase
             }
             catch (OperationCanceledException)
             {
-
+                // При отмене или таймауте завершается все дерево, иначе дочерние процессы
+                // могут остаться жить после завершения оболочки.
                 await KillProcessTreeAsync(process);
 
                 if (ct.IsCancellationRequested)
@@ -175,6 +216,12 @@ public sealed class BashTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Запускает команду в фоне и пишет вывод в лог-файл.
+    /// </summary>
+    /// <param name="command">Команда для запуска.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <returns>Сводка с PID и путем к лог-файлу.</returns>
     private static ToolResult RunBackground(string command, ToolContext context)
     {
         var home = Environment.GetEnvironmentVariable("HOME") ?? "/root";
@@ -188,6 +235,7 @@ public sealed class BashTool : ToolBase
         var logName = $"bg-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}.log";
         var logPath = Path.Combine(bgDir, logName);
 
+        // exec перенаправляет весь дальнейший вывод оболочки и дочернего процесса в один лог.
         var wrapped = $"exec >>'{logPath}' 2>&1; {command}";
 
         var psi = new ProcessStartInfo
@@ -230,6 +278,11 @@ public sealed class BashTool : ToolBase
         return ToolResult.Success(summary);
     }
 
+    /// <summary>
+    /// Пытается завершить процесс и все его дочерние процессы.
+    /// </summary>
+    /// <param name="process">Корневой процесс для завершения.</param>
+    /// <returns>Асинхронная операция завершения процесса.</returns>
     private static async Task KillProcessTreeAsync(Process process)
     {
         try
@@ -239,11 +292,11 @@ public sealed class BashTool : ToolBase
         }
         catch (InvalidOperationException)
         {
-
+            // Процесс уже мог завершиться между проверкой и попыткой остановки.
         }
         catch (Exception)
         {
-
+            // Любая ошибка завершения здесь подавляется, чтобы вернуть исходную ошибку вызова.
         }
 
         try
@@ -253,7 +306,7 @@ public sealed class BashTool : ToolBase
         }
         catch
         {
-
+            // Дополнительное ожидание best-effort: если не удалось, вызывающий уже получил ошибку.
         }
     }
 

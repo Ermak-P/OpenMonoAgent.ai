@@ -4,11 +4,25 @@ using OpenMono.Utils;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Выполняет точечную замену текста в существующем файле.
+/// </summary>
 public sealed class FileEditTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "FileEdit";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Perform an exact string replacement in a file. The old_string must match exactly one location in the file.";
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("file_path", "Absolute path to the file to edit")
         .AddString("old_string", "The exact text to find and replace")
@@ -16,6 +30,11 @@ public sealed class FileEditTool : ToolBase
         .AddBoolean("replace_all", "Replace all occurrences (default: false)")
         .Require("file_path", "old_string", "new_string");
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для редактирования указанного файла.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Список требуемых возможностей.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var filePath = input.TryGetProperty("file_path", out var fp) ? fp.GetString() : null;
@@ -24,6 +43,13 @@ public sealed class FileEditTool : ToolBase
         return [new FileWriteCap(filePath, "modify")];
     }
 
+    /// <summary>
+    /// Выполняет замену текста в файле.
+    /// </summary>
+    /// <param name="input">JSON с путем к файлу и строками замены.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат редактирования файла.</returns>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var filePath = input.GetProperty("file_path").GetString()!;
@@ -99,6 +125,11 @@ public sealed class FileEditTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Формирует подсказку по диагностике отказа записи.
+    /// </summary>
+    /// <param name="path">Путь к файлу, запись в который завершилась ошибкой.</param>
+    /// <returns>Текст рекомендации для пользователя.</returns>
     private static string DiagnoseWriteFailure(string path)
     {
         try
@@ -115,6 +146,12 @@ public sealed class FileEditTool : ToolBase
         return $"Cannot edit '{path}': access denied. Check ownership with: ls -la {path}";
     }
 
+    /// <summary>
+    /// Подсчитывает количество точных вхождений подстроки в тексте.
+    /// </summary>
+    /// <param name="text">Текст для поиска.</param>
+    /// <param name="search">Искомая подстрока.</param>
+    /// <returns>Количество найденных вхождений.</returns>
     private static int CountOccurrences(string text, string search)
     {
         int count = 0, index = 0;
@@ -126,6 +163,13 @@ public sealed class FileEditTool : ToolBase
         return count;
     }
 
+    /// <summary>
+    /// Заменяет только первое точное вхождение строки.
+    /// </summary>
+    /// <param name="text">Исходный текст.</param>
+    /// <param name="oldValue">Строка, которую нужно заменить.</param>
+    /// <param name="newValue">Новая строка.</param>
+    /// <returns>Обновленный текст.</returns>
     private static string ReplaceFirst(string text, string oldValue, string newValue)
     {
         var index = text.IndexOf(oldValue, StringComparison.Ordinal);

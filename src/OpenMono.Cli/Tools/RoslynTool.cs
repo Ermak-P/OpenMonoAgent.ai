@@ -9,41 +9,114 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Выполняет семантический анализ C#-кода через Roslyn и предоставляет результаты в формате инструментов OpenMono.
+/// </summary>
 public sealed class RoslynTool : ToolBase, IDisposable
 {
+    /// <summary>
+    /// Получает имя инструмента.
+    /// </summary>
     public override string Name => "Roslyn";
+
+    /// <summary>
+    /// Получает описание назначения инструмента.
+    /// </summary>
     public override string Description =>
         "C# semantic code analysis via Roslyn compiler. " +
         "Analyzes reference projects (ref/) and the current workspace together. " +
         "Find references, callers, type hierarchy, diagnostics, and search symbols " +
         "with compiler-level accuracy. For C# projects only — use code-review-graph for other languages.";
+
+    /// <summary>
+    /// Получает признак безопасного параллельного выполнения.
+    /// </summary>
     public override bool IsConcurrencySafe => true;
+
+    /// <summary>
+    /// Получает признак того, что инструмент не изменяет проект.
+    /// </summary>
     public override bool IsReadOnly => true;
+
+    /// <summary>
+    /// Получает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
+    /// <summary>
+    /// Путь к дополнительному каталогу со справочными исходниками, если он настроен.
+    /// </summary>
     private readonly string? _referenceDirectory;
 
+    /// <summary>
+    /// Кэш базовой линии диагностик для файлов и рабочих каталогов.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, HashSet<string>> _baselineCache = new();
+
+    /// <summary>
+    /// Временное рабочее пространство Roslyn, собранное из исходников проекта.
+    /// </summary>
+    private AdhocWorkspace? _workspace;
+
+    /// <summary>
+    /// Идентификатор синтетического проекта анализа внутри рабочего пространства.
+    /// </summary>
+    private ProjectId? _projectId;
+
+    /// <summary>
+    /// Текущая компиляция C#, построенная для анализа.
+    /// </summary>
+    private CSharpCompilation? _compilation;
+
+    /// <summary>
+    /// Рабочий каталог, для которого был построен текущий кэш компиляции.
+    /// </summary>
+    private string? _cachedDir;
+
+    /// <summary>
+    /// Момент времени, когда кэш компиляции был обновлен в последний раз.
+    /// </summary>
+    private DateTime _loadedAt;
+
+    /// <summary>
+    /// Семафор, предотвращающий параллельную пересборку компиляции.
+    /// </summary>
+    private readonly SemaphoreSlim _loadLock = new(1, 1);
+
+    /// <summary>
+    /// Время жизни кэша компиляции.
+    /// </summary>
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Инициализирует новый экземпляр <see cref="RoslynTool"/>.
+    /// </summary>
+    /// <param name="referenceDirectory">Необязательный каталог со справочными исходниками.</param>
     public RoslynTool(string? referenceDirectory = null)
     {
         _referenceDirectory = referenceDirectory;
     }
 
+    /// <summary>
+    /// Описывает схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы для действий семантического анализа.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddEnum("action", "The analysis action to perform",
             "overview", "find-references", "callers", "diagnostics", "capture-baseline", "search", "type-hierarchy", "blast-radius", "get-symbol")
         .AddString("target", "Symbol name (e.g. 'MyClass', 'MyClass.MyMethod'), file path for overview/diagnostics/capture-baseline, or search query. Use '.' for project-wide.")
         .Require("action", "target");
 
-    private readonly ConcurrentDictionary<string, HashSet<string>> _baselineCache = new();
-
-    private AdhocWorkspace? _workspace;
-    private ProjectId? _projectId;
-    private CSharpCompilation? _compilation;
-    private string? _cachedDir;
-    private DateTime _loadedAt;
-    private readonly SemaphoreSlim _loadLock = new(1, 1);
-    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
-
+    /// <summary>
+    /// Выполняет запрошенное действие Roslyn-анализа.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат анализа в текстовом виде.</returns>
+    /// <remarks>
+    /// Перед выполнением действия метод убеждается, что в рабочем каталоге или справочных исходниках действительно есть C#-файлы.
+    /// </remarks>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var action = input.GetProperty("action").GetString()!;
@@ -88,6 +161,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Загружает или пересобирает Roslyn-компиляцию для текущего рабочего каталога.
+    /// </summary>
+    /// <param name="workDir">Рабочий каталог, исходники которого нужно проанализировать.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Асинхронная задача загрузки компиляции.</returns>
     private async Task LoadCompilationAsync(string workDir, CancellationToken ct)
     {
         await _loadLock.WaitAsync(ct);
@@ -139,15 +218,24 @@ public sealed class RoslynTool : ToolBase, IDisposable
                         SourceText.From(text, Encoding.UTF8),
                         filePath: file);
                 }
-                catch {  }
+                catch
+                {
+                    // Недоступные или поврежденные файлы пропускаются, чтобы анализ мог продолжаться по остальным исходникам.
+                }
             }
 
             var runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
             var refs = new List<MetadataReference>();
             foreach (var dll in Directory.EnumerateFiles(runtimeDir, "*.dll"))
             {
-                try { refs.Add(MetadataReference.CreateFromFile(dll)); }
-                catch {  }
+                try
+                {
+                    refs.Add(MetadataReference.CreateFromFile(dll));
+                }
+                catch
+                {
+                    // Отдельные невалидные сборки рантайма не должны прерывать построение компиляции.
+                }
             }
             solution = solution.AddMetadataReferences(_projectId, refs);
 
@@ -164,6 +252,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Формирует обзор по одному файлу или по всей компиляции.
+    /// </summary>
+    /// <param name="target">Целевой файл или <c>.</c> для обзора проекта целиком.</param>
+    /// <param name="workDir">Рабочий каталог, относительно которого разрешаются пути.</param>
+    /// <returns>Результат с обзором типов и диагностик.</returns>
     private ToolResult GetOverview(string target, string workDir)
     {
         var sb = new StringBuilder();
@@ -215,6 +309,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Находит ссылки на указанный символ.
+    /// </summary>
+    /// <param name="target">Имя искомого символа.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат со списком ссылок на символ.</returns>
     private async Task<ToolResult> FindReferencesAsync(string target, CancellationToken ct)
     {
         var symbols = ResolveSymbols(target);
@@ -252,6 +352,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Находит прямых вызывающих для указанного метода.
+    /// </summary>
+    /// <param name="target">Имя целевого метода.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат со списком вызывающих методов.</returns>
     private async Task<ToolResult> FindCallersAsync(string target, CancellationToken ct)
     {
         var symbols = ResolveSymbols(target);
@@ -286,6 +392,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Сохраняет базовую линию текущих диагностик, чтобы позже скрывать уже существующие проблемы.
+    /// </summary>
+    /// <param name="target">Целевой файл или <c>.</c> для всего проекта.</param>
+    /// <param name="workDir">Рабочий каталог, относительно которого разрешаются пути.</param>
+    /// <returns>Результат с информацией о сохраненной базовой линии.</returns>
     private ToolResult CaptureBaseline(string target, string workDir)
     {
         var filePath = target == "." ? null : ResolveFilePath(target, workDir);
@@ -317,6 +429,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
             "Call 'diagnostics' after your edits to see only new issues.");
     }
 
+    /// <summary>
+    /// Возвращает диагностики для файла или всего проекта, скрывая уже известные проблемы при наличии базовой линии.
+    /// </summary>
+    /// <param name="target">Целевой файл или <c>.</c> для всего проекта.</param>
+    /// <param name="workDir">Рабочий каталог, относительно которого разрешаются пути.</param>
+    /// <returns>Результат со списком актуальных диагностик.</returns>
     private ToolResult GetDiagnostics(string target, string workDir)
     {
         IEnumerable<Diagnostic> diagnostics;
@@ -346,6 +464,7 @@ public sealed class RoslynTool : ToolBase, IDisposable
         if (_baselineCache.TryGetValue(storeKey, out var baseline))
         {
             var before = relevant.Count;
+            // Сравнение по стабильному ключу позволяет убрать из вывода только заранее зафиксированные предупреждения.
             relevant = [.. relevant.Where(d => !baseline.Contains(DiagnosticKey(d)))];
             var filtered = before - relevant.Count;
             baselineNote = filtered > 0
@@ -373,12 +492,22 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Строит стабильный ключ диагностики для хранения в базовой линии.
+    /// </summary>
+    /// <param name="d">Диагностика Roslyn.</param>
+    /// <returns>Строковый ключ диагностики.</returns>
     private static string DiagnosticKey(Diagnostic d)
     {
         var span = d.Location.GetLineSpan();
         return $"{span.Path}:{span.StartLinePosition.Line}:{d.Id}:{d.GetMessage()}";
     }
 
+    /// <summary>
+    /// Выполняет поиск символов по подстроке имени.
+    /// </summary>
+    /// <param name="pattern">Шаблон поиска в имени символа.</param>
+    /// <returns>Результат со списком найденных символов.</returns>
     private ToolResult SearchSymbols(string pattern)
     {
         var results = new List<(ISymbol Symbol, string Location)>();
@@ -400,6 +529,11 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Строит иерархию наследования и реализованных интерфейсов для указанного типа.
+    /// </summary>
+    /// <param name="target">Имя анализируемого типа.</param>
+    /// <returns>Результат с иерархией типов.</returns>
     private ToolResult GetTypeHierarchy(string target)
     {
         var symbols = ResolveSymbols(target);
@@ -450,6 +584,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Оценивает радиус влияния изменения символа по прямым и транзитивным зависимостям.
+    /// </summary>
+    /// <param name="target">Имя анализируемого символа.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат с перечнем зависимых символов.</returns>
     private async Task<ToolResult> GetBlastRadiusAsync(string target, CancellationToken ct)
     {
         var symbols = ResolveSymbols(target);
@@ -474,6 +614,7 @@ public sealed class RoslynTool : ToolBase, IDisposable
                 var model = _compilation!.GetSemanticModel(tree);
                 var node = tree.GetRoot(ct).FindNode(loc.Location.SourceSpan);
 
+                // Влияние привязывается к ближайшей объявленной сущности, которая использует символ.
                 var containingDecl = node.Ancestors().FirstOrDefault(n =>
                     n is MethodDeclarationSyntax or PropertyDeclarationSyntax
                     or ConstructorDeclarationSyntax or EventDeclarationSyntax);
@@ -541,6 +682,11 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Возвращает подробную информацию о найденных символах.
+    /// </summary>
+    /// <param name="target">Имя анализируемого символа.</param>
+    /// <returns>Результат с атрибутами символа и его местоположением.</returns>
     private ToolResult GetSymbolInfo(string target)
     {
         var symbols = ResolveSymbols(target);
@@ -603,6 +749,11 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return ToolResult.Success(sb.ToString());
     }
 
+    /// <summary>
+    /// Разрешает текстовое имя в набор символов компиляции.
+    /// </summary>
+    /// <param name="name">Имя символа, например <c>Type.Member</c>.</param>
+    /// <returns>Список подходящих символов без дубликатов.</returns>
     private IReadOnlyList<ISymbol> ResolveSymbols(string name)
     {
         if (_compilation is null) return [];
@@ -613,6 +764,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return results.GroupBy(s => s.ToDisplayString()).Select(g => g.First()).ToList();
     }
 
+    /// <summary>
+    /// Рекурсивно собирает символы, соответствующие указанным сегментам имени.
+    /// </summary>
+    /// <param name="container">Контейнер пространств имен или типов.</param>
+    /// <param name="parts">Сегменты имени символа.</param>
+    /// <param name="results">Коллекция для накопления найденных символов.</param>
     private static void CollectMatchingSymbols(
         INamespaceOrTypeSymbol container, string[] parts, List<ISymbol> results)
     {
@@ -637,7 +794,7 @@ public sealed class RoslynTool : ToolBase, IDisposable
                 }
                 else if (parts.Length == 1)
                 {
-
+                    // Для одночастного имени дополнительно ищем совпадающие члены внутри каждого типа.
                     foreach (var typeMember in type.GetMembers())
                     {
                         if (typeMember.Name == parts[0] && !typeMember.IsImplicitlyDeclared)
@@ -650,6 +807,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Проверяет, соответствует ли символ заданным сегментам имени.
+    /// </summary>
+    /// <param name="symbol">Проверяемый символ.</param>
+    /// <param name="parts">Сегменты имени символа.</param>
+    /// <returns><see langword="true"/>, если символ соответствует имени; иначе <see langword="false"/>.</returns>
     private static bool MatchesName(ISymbol symbol, string[] parts)
     {
         if (parts.Length == 1)
@@ -661,6 +824,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return symbol.ToDisplayString().EndsWith(string.Join(".", parts), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Добавляет в обзор описание типа и его явных членов.
+    /// </summary>
+    /// <param name="sb">Буфер, в который записывается обзор.</param>
+    /// <param name="type">Описываемый тип.</param>
+    /// <param name="indent">Отступ для форматирования вложенного вывода.</param>
     private static void AppendTypeOverview(StringBuilder sb, INamedTypeSymbol type, string indent)
     {
         var kind = type.TypeKind switch
@@ -706,10 +875,20 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Форматирует сигнатуру параметров метода в компактную строку.
+    /// </summary>
+    /// <param name="method">Метод, параметры которого нужно представить.</param>
+    /// <returns>Строковое представление параметров метода.</returns>
     private static string FormatParams(IMethodSymbol method) =>
         string.Join(", ", method.Parameters.Select(p =>
             $"{p.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)} {p.Name}"));
 
+    /// <summary>
+    /// Форматирует местоположение символа относительно кэшированного рабочего каталога.
+    /// </summary>
+    /// <param name="symbol">Символ, местоположение которого требуется вывести.</param>
+    /// <returns>Строка вида <c>путь:строка</c>.</returns>
     private string FormatLocation(ISymbol symbol)
     {
         var loc = symbol.Locations.FirstOrDefault();
@@ -718,12 +897,23 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return $"{RelPath(span.Path)}:{span.StartLinePosition.Line + 1}";
     }
 
+    /// <summary>
+    /// Преобразует абсолютный путь в путь относительно кэшированного рабочего каталога.
+    /// </summary>
+    /// <param name="path">Абсолютный или относительный путь.</param>
+    /// <returns>Относительный путь либо <c>unknown</c>, если путь отсутствует.</returns>
     private string RelPath(string? path)
     {
         if (path is null) return "unknown";
         return _cachedDir is not null ? Path.GetRelativePath(_cachedDir, path) : path;
     }
 
+    /// <summary>
+    /// Разрешает путь к файлу относительно рабочего каталога.
+    /// </summary>
+    /// <param name="target">Путь, заданный пользователем.</param>
+    /// <param name="workDir">Рабочий каталог.</param>
+    /// <returns>Абсолютный путь к существующему файлу или <see langword="null"/>.</returns>
     private static string? ResolveFilePath(string target, string workDir)
     {
         if (Path.IsPathRooted(target) && File.Exists(target)) return target;
@@ -731,6 +921,11 @@ public sealed class RoslynTool : ToolBase, IDisposable
         return File.Exists(combined) ? Path.GetFullPath(combined) : null;
     }
 
+    /// <summary>
+    /// Проверяет, содержит ли каталог хотя бы один C#-файл, пригодный для анализа.
+    /// </summary>
+    /// <param name="dir">Каталог для проверки.</param>
+    /// <returns><see langword="true"/>, если найден хотя бы один подходящий файл; иначе <see langword="false"/>.</returns>
     private static bool HasCSharpFiles(string dir)
     {
         try
@@ -738,9 +933,17 @@ public sealed class RoslynTool : ToolBase, IDisposable
             return Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories)
                 .Any(f => !IsExcludedPath(f));
         }
-        catch { return false; }
+        catch
+        {
+            return false;
+        }
     }
 
+    /// <summary>
+    /// Определяет, следует ли исключить путь из анализа.
+    /// </summary>
+    /// <param name="path">Путь к файлу.</param>
+    /// <returns><see langword="true"/>, если путь относится к служебным каталогам; иначе <see langword="false"/>.</returns>
     private static bool IsExcludedPath(string path)
     {
         var n = path.Replace('\\', '/');
@@ -748,6 +951,11 @@ public sealed class RoslynTool : ToolBase, IDisposable
             || n.Contains("/node_modules/") || n.Contains("/.git/");
     }
 
+    /// <summary>
+    /// Собирает все типы из исходников проекта.
+    /// </summary>
+    /// <param name="container">Контейнер пространств имен или типов.</param>
+    /// <param name="types">Коллекция для накопления найденных типов.</param>
     private static void CollectAllTypes(INamespaceOrTypeSymbol container, List<INamedTypeSymbol> types)
     {
         foreach (var member in container.GetMembers())
@@ -762,6 +970,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Рекурсивно собирает наследников и реализации указанного базового типа.
+    /// </summary>
+    /// <param name="container">Контейнер пространств имен или типов.</param>
+    /// <param name="baseType">Базовый тип или интерфейс.</param>
+    /// <param name="results">Коллекция для накопления найденных производных типов.</param>
     private static void CollectDerivedTypes(
         INamespaceOrTypeSymbol container, INamedTypeSymbol baseType, List<INamedTypeSymbol> results)
     {
@@ -782,6 +996,12 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Собирает символы, имена которых содержат заданный шаблон.
+    /// </summary>
+    /// <param name="container">Контейнер пространств имен или типов.</param>
+    /// <param name="pattern">Шаблон поиска по подстроке.</param>
+    /// <param name="results">Коллекция для накопления найденных символов и их местоположений.</param>
     private void CollectMatchingSearch(
         INamespaceOrTypeSymbol container, string pattern, List<(ISymbol, string)> results)
     {
@@ -808,6 +1028,9 @@ public sealed class RoslynTool : ToolBase, IDisposable
         }
     }
 
+    /// <summary>
+    /// Освобождает ресурсы рабочего пространства Roslyn и синхронизации.
+    /// </summary>
     public void Dispose()
     {
         _workspace?.Dispose();

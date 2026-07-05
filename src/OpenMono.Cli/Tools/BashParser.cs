@@ -4,9 +4,16 @@ using OpenMono.Permissions;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Разбирает shell-команды на сегменты, перенаправления и вложенные подкоманды.
+/// </summary>
 public static class BashParser
 {
-
+    /// <summary>
+    /// Разбирает строку shell-команды в структурированное представление.
+    /// </summary>
+    /// <param name="command">Исходная командная строка.</param>
+    /// <returns>Результат разбора команды.</returns>
     public static BashParseResult Parse(string command)
     {
         if (string.IsNullOrWhiteSpace(command))
@@ -36,6 +43,8 @@ public static class BashParser
 
         foreach (var subshell in subshells.Take(50))
         {
+            // Вложенные команды разбираются рекурсивно, но с ограничением,
+            // чтобы искусственно глубокий ввод не раздувал объем анализа.
             var subResult = Parse(subshell);
             segments.AddRange(subResult.Segments);
             redirections.AddRange(subResult.Redirections);
@@ -44,6 +53,11 @@ public static class BashParser
         return new BashParseResult(segments, redirections, subshells);
     }
 
+    /// <summary>
+    /// Преобразует результат разбора команды в список требуемых возможностей.
+    /// </summary>
+    /// <param name="result">Структурированный результат разбора.</param>
+    /// <returns>Список возможностей, соответствующих сегментам и перенаправлениям.</returns>
     public static IReadOnlyList<Capability> ToCapabilities(BashParseResult result)
     {
         var caps = new List<Capability>();
@@ -64,9 +78,13 @@ public static class BashParser
         return caps;
     }
 
+    /// <summary>
+    /// Проверяет разобранную команду на потенциально разрушительные шаблоны.
+    /// </summary>
+    /// <param name="result">Результат разбора shell-команды.</param>
+    /// <returns>Текст причины, если команда опасна; иначе <see langword="null" />.</returns>
     public static string? CheckDestructive(BashParseResult result)
     {
-
         var segments = result.Segments.ToList();
         for (var i = 0; i < segments.Count; i++)
         {
@@ -89,7 +107,8 @@ public static class BashParser
             var lastSeg = segments[^1];
             if (IsShellInterpreter(lastSeg.Binary))
             {
-
+                // Дополнительная проверка нужна, потому что оператор pipe хранится
+                // у предыдущего сегмента, а потенциально опасен последний интерпретатор.
                 for (var i = 0; i < segments.Count - 1; i++)
                 {
                     if (segments[i].Operator == CompoundOp.Pipe)
@@ -107,6 +126,11 @@ public static class BashParser
         return null;
     }
 
+    /// <summary>
+    /// Определяет, является ли бинарник shell-интерпретатором.
+    /// </summary>
+    /// <param name="binary">Имя или путь до исполняемого файла.</param>
+    /// <returns><see langword="true" />, если это shell-интерпретатор; иначе <see langword="false" />.</returns>
     private static bool IsShellInterpreter(string binary)
     {
         var shellInterpreters = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -117,6 +141,11 @@ public static class BashParser
         return shellInterpreters.Contains(binary);
     }
 
+    /// <summary>
+    /// Проверяет отдельный сегмент команды на опасные операции.
+    /// </summary>
+    /// <param name="seg">Сегмент команды для анализа.</param>
+    /// <returns>Причина блокировки или <see langword="null" />, если сегмент безопасен.</returns>
     private static string? CheckSegmentDestructive(CommandSegment seg)
     {
         var binary = seg.Binary.ToLowerInvariant();
@@ -183,6 +212,7 @@ public static class BashParser
             var argList = seg.Args.ToList();
             for (var i = 0; i < argList.Count; i++)
             {
+                // У этих флагов следующий токен является аргументом флага, а не именем команды.
                 if (flagsTakingArg.Contains(argList[i])) { i++; continue; }
                 if (argList[i].StartsWith('-')) continue;
                 targetCmd = argList[i];
@@ -197,6 +227,11 @@ public static class BashParser
         return null;
     }
 
+    /// <summary>
+    /// Проверяет, относится ли путь к защищенным системным расположениям.
+    /// </summary>
+    /// <param name="path">Путь для проверки.</param>
+    /// <returns><see langword="true" />, если путь считается защищенным; иначе <see langword="false" />.</returns>
     private static bool IsProtectedPath(string path)
     {
         var normalized = path.Replace('\\', '/').ToLowerInvariant();
@@ -214,6 +249,11 @@ public static class BashParser
         return protectedPrefixes.Any(p => normalized.StartsWith(p) || normalized == p.TrimEnd('/'));
     }
 
+    /// <summary>
+    /// Извлекает подкоманды из конструкций <c>$(...)</c>, <c>`...`</c> и <c>(...)</c>.
+    /// </summary>
+    /// <param name="command">Исходная командная строка.</param>
+    /// <returns>Команда с маркерами подкоманд и список извлеченных тел подкоманд.</returns>
     private static (string Processed, List<string> Subshells) ExtractSubshells(string command)
     {
         var subshells = new List<string>();
@@ -266,6 +306,12 @@ public static class BashParser
         return (result.ToString(), subshells);
     }
 
+    /// <summary>
+    /// Извлекает содержимое скобочной группы с учетом вложенности и кавычек.
+    /// </summary>
+    /// <param name="s">Строка, содержащая группу.</param>
+    /// <param name="openParen">Индекс открывающей скобки.</param>
+    /// <returns>Содержимое группы и индекс закрывающей скобки.</returns>
     private static (string? Content, int EndIndex) ExtractParenContent(string s, int openParen)
     {
         if (openParen >= s.Length || s[openParen] != '(')
@@ -303,6 +349,11 @@ public static class BashParser
         return (null, s.Length);
     }
 
+    /// <summary>
+    /// Делит командную строку по составным операторам shell вне кавычек.
+    /// </summary>
+    /// <param name="command">Командная строка для разбиения.</param>
+    /// <returns>Список сегментов и операторов, следующих за ними.</returns>
     private static List<(string Segment, CompoundOp Operator)> SplitOnCompoundOperators(string command)
     {
         var result = new List<(string, CompoundOp)>();
@@ -340,7 +391,8 @@ public static class BashParser
 
             if (!inSingleQuote && !inDoubleQuote)
             {
-
+                // Операторы учитываются только вне кавычек, иначе строки вроде
+                // "echo a && b" были бы разобраны неверно.
                 if (i + 1 < command.Length && command[i] == '&' && command[i + 1] == '&')
                 {
                     result.Add((current.ToString().Trim(), CompoundOp.And));
@@ -382,6 +434,11 @@ public static class BashParser
         return result;
     }
 
+    /// <summary>
+    /// Извлекает перенаправления ввода-вывода из сегмента команды.
+    /// </summary>
+    /// <param name="segment">Сегмент команды без разбиения на токены.</param>
+    /// <returns>Очищенный сегмент и найденные перенаправления.</returns>
     private static (string Cleaned, List<Redirection> Redirections) ExtractRedirections(string segment)
     {
         var redirections = new List<Redirection>();
@@ -397,6 +454,7 @@ public static class BashParser
             var op = m.Groups[1].Value;
             var target = m.Groups["target"].Value.Trim('"', '\'');
 
+            // Перенаправления вида 2>&1 меняют файловый дескриптор, а не открывают путь.
             if (target.StartsWith('&'))
                 continue;
 
@@ -411,6 +469,11 @@ public static class BashParser
         return (cleaned, redirections);
     }
 
+    /// <summary>
+    /// Разбирает простой командный сегмент на исполняемый файл и аргументы.
+    /// </summary>
+    /// <param name="segment">Сегмент команды без операторов и перенаправлений.</param>
+    /// <returns>Имя бинарника и список аргументов.</returns>
     private static (string Binary, IReadOnlyList<string> Args) ParseSimpleCommand(string segment)
     {
         var tokens = Tokenize(segment);
@@ -428,6 +491,11 @@ public static class BashParser
         return (effective[0], effective.Skip(1).ToList());
     }
 
+    /// <summary>
+    /// Определяет, является ли токен присваиванием переменной окружения.
+    /// </summary>
+    /// <param name="token">Токен для проверки.</param>
+    /// <returns><see langword="true" />, если токен имеет вид присваивания; иначе <see langword="false" />.</returns>
     private static bool IsEnvVarAssignment(string token)
     {
         var eq = token.IndexOf('=');
@@ -437,6 +505,11 @@ public static class BashParser
                name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 
+    /// <summary>
+    /// Токенизирует shell-строку с учетом кавычек и экранирования.
+    /// </summary>
+    /// <param name="input">Исходная строка сегмента.</param>
+    /// <returns>Список токенов.</returns>
     private static List<string> Tokenize(string input)
     {
         var tokens = new List<string>();
@@ -491,28 +564,63 @@ public static class BashParser
     }
 }
 
+/// <summary>
+/// Содержит итог разбора shell-команды.
+/// </summary>
+/// <param name="Segments">Последовательность командных сегментов.</param>
+/// <param name="Redirections">Список перенаправлений ввода-вывода.</param>
+/// <param name="Subshells">Извлеченные подкоманды.</param>
 public sealed record BashParseResult(
     IReadOnlyList<CommandSegment> Segments,
     IReadOnlyList<Redirection> Redirections,
     IReadOnlyList<string> Subshells);
 
+/// <summary>
+/// Описывает один сегмент shell-команды.
+/// </summary>
+/// <param name="Binary">Имя исполняемого файла.</param>
+/// <param name="Args">Аргументы команды.</param>
+/// <param name="Operator">Оператор, следующий за сегментом.</param>
 public sealed record CommandSegment(
     string Binary,
     IReadOnlyList<string> Args,
     CompoundOp Operator);
 
+/// <summary>
+/// Описывает одно перенаправление ввода-вывода.
+/// </summary>
+/// <param name="Target">Целевой путь перенаправления.</param>
+/// <param name="IsInput">Признак перенаправления на чтение.</param>
+/// <param name="IsAppend">Признак режима дозаписи.</param>
 public sealed record Redirection(string Target, bool IsInput, bool IsAppend);
 
+/// <summary>
+/// Перечисляет составные операторы shell между сегментами команды.
+/// </summary>
 public enum CompoundOp
 {
-
+    /// <summary>
+    /// Оператор отсутствует.
+    /// </summary>
     None,
 
+    /// <summary>
+    /// Логическое И <c>&amp;&amp;</c>.
+    /// </summary>
     And,
 
+    /// <summary>
+    /// Логическое ИЛИ <c>||</c>.
+    /// </summary>
     Or,
 
+    /// <summary>
+    /// Последовательное выполнение через <c>;</c>.
+    /// </summary>
     Sequence,
 
+    /// <summary>
+    /// Конвейер через <c>|</c>.
+    /// </summary>
     Pipe
 }

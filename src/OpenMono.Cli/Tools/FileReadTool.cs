@@ -8,18 +8,47 @@ using OpenMono.Utils;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Читает файлы из файловой системы и возвращает их содержимое с номерами строк.
+/// </summary>
 public sealed class FileReadTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "FileRead";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Read a file from the filesystem. Returns the contents with line numbers. " +
         "For image files (png, jpg, jpeg, gif, webp), attaches the image directly so you can view and describe it. " +
         "Can also read multiple files from a cursor (e.g., from Grep results).";
+
+    /// <summary>
+    /// Указывает, что инструмент безопасен для параллельного выполнения.
+    /// </summary>
     public override bool IsConcurrencySafe => true;
+
+    /// <summary>
+    /// Указывает, что инструмент не изменяет внешнее состояние.
+    /// </summary>
     public override bool IsReadOnly => true;
+
+    /// <summary>
+    /// Возвращает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
+    /// <summary>
+    /// Кэширует хеши ранее прочитанного содержимого по пути и диапазону строк.
+    /// </summary>
     private static readonly ConcurrentDictionary<string, (long MtimeTicks, string ContentHash)> _readCache = new();
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("file_path", "Absolute path to the file to read")
         .AddInteger("offset", "Line number to start reading from (0-based)", minimum: 0)
@@ -27,9 +56,13 @@ public sealed class FileReadTool : ToolBase
         .AddString("from_cursor", "P2.6: Cursor ID from a previous tool (e.g., Grep). Reads all files in the cursor.")
         .AddInteger("max_files", "When using from_cursor, maximum number of files to read (default: 5)", minimum: 1, maximum: 20);
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для чтения файла.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Список требуемых возможностей.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
-
         if (input.TryGetProperty("from_cursor", out _))
             return [];
 
@@ -39,9 +72,15 @@ public sealed class FileReadTool : ToolBase
         return [new FileReadCap(filePath)];
     }
 
+    /// <summary>
+    /// Читает содержимое файла либо группу файлов из курсора.
+    /// </summary>
+    /// <param name="input">JSON с путем к файлу или идентификатором курсора.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат чтения файла или файлов.</returns>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
-
         if (input.TryGetProperty("from_cursor", out var cursorProp) &&
             cursorProp.GetString() is { } cursorId)
         {
@@ -61,6 +100,7 @@ public sealed class FileReadTool : ToolBase
             .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var isContentCache = resolvedPath.StartsWith(contentCacheDir, StringComparison.Ordinal);
 
+        // Каталог content-cache живет вне рабочего дерева, поэтому для него ослабляется обычная проверка PathGuard.
         if (!isContentCache && PathGuard.Validate(resolvedPath, context.WorkingDirectory) is { } guardError)
             return ToolResult.Error(guardError);
 
@@ -136,14 +176,26 @@ public sealed class FileReadTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Вычисляет короткий SHA-256-хеш содержимого.
+    /// </summary>
+    /// <param name="content">Текст, для которого нужно вычислить хеш.</param>
+    /// <returns>Укороченное шестнадцатеричное представление хеша.</returns>
     private static string ComputeHash(string content)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content));
         return Convert.ToHexString(bytes)[..16];
     }
 
+    /// <summary>
+    /// Очищает кэш чтения файлов.
+    /// </summary>
     public static void ClearCache() => _readCache.Clear();
 
+    /// <summary>
+    /// Удаляет из кэша все записи, относящиеся к указанному файлу.
+    /// </summary>
+    /// <param name="resolvedPath">Нормализованный путь к файлу.</param>
     public static void InvalidateCache(string resolvedPath)
     {
         var keysToRemove = _readCache.Keys.Where(k => k.StartsWith(resolvedPath + "|")).ToList();
@@ -151,6 +203,14 @@ public sealed class FileReadTool : ToolBase
             _readCache.TryRemove(key, out _);
     }
 
+    /// <summary>
+    /// Читает несколько файлов, перечисленных в сохраненном курсоре поиска.
+    /// </summary>
+    /// <param name="cursorId">Идентификатор курсора.</param>
+    /// <param name="input">JSON с дополнительными параметрами чтения.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат чтения файлов из курсора.</returns>
     private async Task<ToolResult> ExecuteFromCursorAsync(
         string cursorId, JsonElement input, ToolContext context, CancellationToken ct)
     {

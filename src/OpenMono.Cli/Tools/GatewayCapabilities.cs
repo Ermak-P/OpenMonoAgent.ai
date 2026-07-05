@@ -6,41 +6,62 @@ using OpenMono.Config;
 namespace OpenMono.Tools;
 
 /// <summary>
-/// Discovers which inference-side web services are installed by asking the Caddy
-/// gateway's <c>GET /services</c> capability endpoint. The inference box is the
-/// single source of truth (<c>WEB_*_ENABLED</c> in <c>docker/.env</c>), so the
-/// agent box doesn't need the user to mirror those flags into local config —
-/// it just asks the gateway. The probe result is cached per gateway URL for the
-/// process lifetime (capabilities don't change within a session).
+/// Определяет доступность веб-сервисов на стороне inference через capability-эндпоинт шлюза.
 /// </summary>
 public static class GatewayCapabilities
 {
-    public enum WebService { Search, Scrape }
+    /// <summary>
+    /// Перечисляет веб-сервисы, поддерживаемые шлюзом.
+    /// </summary>
+    public enum WebService
+    {
+        /// <summary>
+        /// Сервис поиска.
+        /// </summary>
+        Search,
 
+        /// <summary>
+        /// Сервис скрейпинга страниц.
+        /// </summary>
+        Scrape,
+    }
+
+    /// <summary>
+    /// Представляет набор возможностей, возвращаемых шлюзом.
+    /// </summary>
+    /// <param name="Search">Признак доступности сервиса поиска.</param>
+    /// <param name="Scrape">Признак доступности сервиса скрейпинга.</param>
     private readonly record struct Capabilities(bool Search, bool Scrape);
 
-    // Short timeout: /services is a tiny local-ish JSON response. If the gateway
-    // isn't there (e.g. llm.endpoint points straight at a bare llama-server),
-    // we want to fail fast and fall back to the built-in tools.
+    /// <summary>
+    /// HTTP-клиент для короткого запроса к эндпоинту <c>/services</c>.
+    /// </summary>
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
 
+    /// <summary>
+    /// Кэширует результаты пробного запроса по URL шлюза.
+    /// </summary>
     private static readonly ConcurrentDictionary<string, Task<Capabilities>> Cache = new();
 
     /// <summary>
-    /// The gateway base URL: an explicit <c>web.gateway</c> wins; otherwise the
-    /// LLM endpoint, which is the same relay URL the gateway fronts in dual-box
-    /// mode (Caddy path-routes <c>/v1</c>, <c>/search</c>, <c>/scrape</c> apart).
+    /// Определяет базовый URL шлюза по конфигурации.
     /// </summary>
+    /// <param name="config">Конфигурация приложения.</param>
+    /// <returns>URL шлюза или конечной точки LLM, если явный шлюз не задан.</returns>
     public static string? ResolveGateway(AppConfig config) =>
         !string.IsNullOrEmpty(config.Web.Gateway) ? config.Web.Gateway : config.Llm.Endpoint;
 
     /// <summary>
-    /// Whether <paramref name="service"/> should route through the gateway. An
-    /// explicit <c>web.search</c> / <c>web.scrape</c> flag always wins; otherwise
-    /// the gateway's <c>/services</c> registry decides. A missing gateway or a
-    /// probe failure resolves to <c>false</c> so the caller falls back to its
-    /// built-in DuckDuckGo / direct-fetch behaviour.
+    /// Определяет, должен ли указанный сервис маршрутизироваться через шлюз.
     /// </summary>
+    /// <param name="config">Конфигурация приложения.</param>
+    /// <param name="service">Проверяемый веб-сервис.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns><see langword="true" />, если сервис доступен; иначе <see langword="false" />.</returns>
+    /// <remarks>
+    /// Явные флаги <c>web.search</c> и <c>web.scrape</c> имеют приоритет над автоматическим
+    /// определением через шлюз.
+    /// </remarks>
     public static async Task<bool> IsEnabledAsync(
         AppConfig config, WebService service, CancellationToken ct)
     {
@@ -58,11 +79,23 @@ public static class GatewayCapabilities
         return service == WebService.Search ? caps.Search : caps.Scrape;
     }
 
+    /// <summary>
+    /// Возвращает задачу пробного опроса шлюза с учетом кэша.
+    /// </summary>
+    /// <param name="gateway">Базовый URL шлюза.</param>
+    /// <param name="apiKey">Необязательный API-ключ.</param>
+    /// <returns>Задача, возвращающая обнаруженные возможности.</returns>
     private static Task<Capabilities> ProbeAsync(string gateway, string? apiKey) =>
-        // Probe with no caller token so one cancelled request can't poison the
-        // cached result for everyone; HttpClient.Timeout still bounds it.
+        // Запрос кэшируется без внешнего токена отмены, чтобы отмена одного вызывающего
+        // не испортила общий результат для остальных запросов.
         Cache.GetOrAdd(gateway.TrimEnd('/'), g => FetchAsync(g, apiKey));
 
+    /// <summary>
+    /// Выполняет фактический HTTP-запрос к шлюзу и разбирает ответ.
+    /// </summary>
+    /// <param name="gateway">Базовый URL шлюза.</param>
+    /// <param name="apiKey">Необязательный API-ключ.</param>
+    /// <returns>Набор возможностей, обнаруженных у шлюза.</returns>
     private static async Task<Capabilities> FetchAsync(string gateway, string? apiKey)
     {
         try
@@ -84,17 +117,22 @@ public static class GatewayCapabilities
         }
         catch
         {
-            // No gateway / no /services route / non-JSON body → fall back.
+            // При любой ошибке вызывающий должен мягко откатиться к встроенному поведению.
             return default;
         }
     }
 
-    // Accept JSON booleans and "true"/"1"/"yes" strings — Caddy substitutes the
-    // env values verbatim, so the field can land as either kind.
+    /// <summary>
+    /// Интерпретирует значение capability-поля как булево.
+    /// </summary>
+    /// <param name="root">Корневой JSON-объект ответа.</param>
+    /// <param name="name">Имя свойства для проверки.</param>
+    /// <returns><see langword="true" />, если свойство трактуется как включенное.</returns>
     private static bool IsTrue(JsonElement root, string name) =>
         root.TryGetProperty(name, out var el) && el.ValueKind switch
         {
             JsonValueKind.True => true,
+            // Caddy подставляет значения окружения как есть, поэтому здесь допустимы и строки.
             JsonValueKind.String => el.GetString()?.Trim().ToLowerInvariant() is "1" or "true" or "yes" or "on",
             _ => false,
         };

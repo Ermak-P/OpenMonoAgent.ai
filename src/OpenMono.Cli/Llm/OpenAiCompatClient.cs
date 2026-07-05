@@ -8,12 +8,17 @@ using OpenMono.Utils;
 
 namespace OpenMono.Llm;
 
+/// <summary>
+/// Клиент для работы с OpenAI-совместимыми API (OpenAI, локальные модели, Ollama и т.д.).
+/// Поддерживает потоковую генерацию, инструменты, контроль конкурентности и извлечение XML-инструментов из текста.
+/// </summary>
 public sealed class OpenAiCompatClient : ILlmClient, IDisposable
 {
     private readonly HttpClient _http;
     private readonly string _endpoint;
     private const int MaxRetries = 3;
 
+    // Семафор для ограничения количества одновременных запросов к API
     private static SemaphoreSlim? _requestGate;
     private static int _gateCapacity;
     private static readonly object _gateInitLock = new();
@@ -24,6 +29,7 @@ public sealed class OpenAiCompatClient : ILlmClient, IDisposable
         TimeSpan.FromSeconds(16),
     ];
 
+    // Регулярные выражения для парсинга XML-формата инструментов (для совместимости с Qwen)
     private static readonly Regex QwenFunctionRegex = new(
         @"<function=(\w+)>(.*?)</function>",
         RegexOptions.Singleline | RegexOptions.Compiled);
@@ -32,11 +38,22 @@ public sealed class OpenAiCompatClient : ILlmClient, IDisposable
         @"<parameter=(\w+)>\s*(.*?)\s*</parameter>",
         RegexOptions.Singleline | RegexOptions.Compiled);
 
+    /// <summary>
+    /// API-ключ для аутентификации (необязательно для локальных моделей).
+    /// </summary>
     public string? ApiKey { get; init; }
+    
+    /// <summary>
+    /// Callback для отладочных сообщений.
+    /// </summary>
     public Action<string>? OnDebug { get; set; }
 
     private readonly string _model;
 
+    /// <summary>
+    /// Инициализирует клиент с заданной конфигурацией LLM.
+    /// </summary>
+    /// <param name="config">Конфигурация модели (эндпоинт, модель, лимиты конкурентности).</param>
     public OpenAiCompatClient(LlmConfig config)
     {
         _endpoint = config.Endpoint.TrimEnd('/');
@@ -45,6 +62,9 @@ public sealed class OpenAiCompatClient : ILlmClient, IDisposable
         EnsureRequestGate(config.MaxConcurrentRequests);
     }
 
+    /// <summary>
+    /// Инициализирует или переиспользует глобальный семафор для контроля конкурентности запросов.
+    /// </summary>
     private static SemaphoreSlim EnsureRequestGate(int requested)
     {
         var capacity = Math.Max(1, requested);
@@ -52,6 +72,7 @@ public sealed class OpenAiCompatClient : ILlmClient, IDisposable
             return existing;
         lock (_gateInitLock)
         {
+            // Double-check после получения блокировки
             if (_requestGate is null || _gateCapacity != capacity)
             {
                 _requestGate?.Dispose();

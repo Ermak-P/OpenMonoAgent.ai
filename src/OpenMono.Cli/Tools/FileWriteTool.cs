@@ -4,16 +4,35 @@ using OpenMono.Utils;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Создает новый файл или полностью перезаписывает существующий.
+/// </summary>
 public sealed class FileWriteTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "FileWrite";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Create a new file or overwrite an existing file with the provided content.";
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("file_path", "Absolute path to the file to write")
         .AddString("content", "The content to write to the file")
         .Require("file_path", "content");
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для записи в указанный файл.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Список требуемых возможностей.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var filePath = input.TryGetProperty("file_path", out var fp) ? fp.GetString() : null;
@@ -23,6 +42,13 @@ public sealed class FileWriteTool : ToolBase
         return [new FileWriteCap(filePath, "modify")];
     }
 
+    /// <summary>
+    /// Записывает содержимое в файл.
+    /// </summary>
+    /// <param name="input">JSON с путем к файлу и содержимым.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат записи файла.</returns>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var filePath = input.GetProperty("file_path").GetString()!;
@@ -76,6 +102,11 @@ public sealed class FileWriteTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Формирует подсказку по диагностике отказа записи.
+    /// </summary>
+    /// <param name="path">Путь к файлу, запись в который завершилась ошибкой.</param>
+    /// <returns>Текст рекомендации для пользователя.</returns>
     private static string DiagnoseWriteFailure(string path)
     {
         try

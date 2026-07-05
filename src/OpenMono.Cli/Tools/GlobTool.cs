@@ -5,19 +5,50 @@ using OpenMono.Permissions;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Ищет файлы по glob-шаблону в указанном каталоге.
+/// </summary>
 public sealed class GlobTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "Glob";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Find files matching a glob pattern. Returns paths sorted by modification time.";
+
+    /// <summary>
+    /// Указывает, что инструмент безопасен для параллельного выполнения.
+    /// </summary>
     public override bool IsConcurrencySafe => true;
+
+    /// <summary>
+    /// Указывает, что инструмент не изменяет внешнее состояние.
+    /// </summary>
     public override bool IsReadOnly => true;
+
+    /// <summary>
+    /// Возвращает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("pattern", "Glob pattern (e.g. **/*.cs, src/**/*.json)")
         .AddString("path", "Directory to search in (default: working directory)")
         .Require("pattern");
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для поиска в каталоге.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Список требуемых возможностей.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var searchPath = input.TryGetProperty("path", out var p) ? p.GetString() : ".";
@@ -26,6 +57,13 @@ public sealed class GlobTool : ToolBase
         return [new FileReadCap(searchPath)];
     }
 
+    /// <summary>
+    /// Выполняет поиск файлов по glob-шаблону.
+    /// </summary>
+    /// <param name="input">JSON с шаблоном и необязательным каталогом поиска.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат поиска файлов.</returns>
     protected override Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var pattern = input.GetProperty("pattern").GetString()!;

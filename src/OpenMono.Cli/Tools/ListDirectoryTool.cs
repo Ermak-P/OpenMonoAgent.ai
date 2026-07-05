@@ -3,19 +3,50 @@ using OpenMono.Permissions;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Возвращает список файлов и каталогов по указанному пути.
+/// </summary>
 public sealed class ListDirectoryTool : ToolBase
 {
+    /// <summary>
+    /// Получает имя инструмента.
+    /// </summary>
     public override string Name => "ListDirectory";
+
+    /// <summary>
+    /// Получает описание назначения инструмента.
+    /// </summary>
     public override string Description => "List files and directories at a given path. Shows file sizes and modification times.";
+
+    /// <summary>
+    /// Получает признак безопасного параллельного выполнения.
+    /// </summary>
     public override bool IsConcurrencySafe => true;
+
+    /// <summary>
+    /// Получает признак того, что инструмент только читает файловую систему.
+    /// </summary>
     public override bool IsReadOnly => true;
+
+    /// <summary>
+    /// Получает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
+    /// <summary>
+    /// Описывает схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы для перечисления каталогов.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("path", "Directory path to list (default: working directory)")
         .AddBoolean("recursive", "List recursively (default: false)")
         .AddInteger("max_entries", "Maximum entries to return (default: 200)");
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для чтения выбранного каталога.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <returns>Список возможностей, требуемых для чтения каталога.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var dirPath = input.TryGetProperty("path", out var p) ? p.GetString() : ".";
@@ -24,6 +55,13 @@ public sealed class ListDirectoryTool : ToolBase
         return [new FileReadCap(dirPath)];
     }
 
+    /// <summary>
+    /// Выполняет перечисление содержимого каталога.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат со списком каталогов и файлов.</returns>
     protected override Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var dirPath = input.TryGetProperty("path", out var p)
@@ -76,6 +114,11 @@ public sealed class ListDirectoryTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Преобразует размер файла в компактное человекочитаемое представление.
+    /// </summary>
+    /// <param name="bytes">Размер файла в байтах.</param>
+    /// <returns>Строковое представление размера файла.</returns>
     private static string FormatSize(long bytes) => bytes switch
     {
         < 1024 => $"{bytes}B",

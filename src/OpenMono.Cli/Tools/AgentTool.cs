@@ -8,18 +8,56 @@ using OpenMono.Session;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Запускает вложенного агента для выполнения сложной подзадачи в отдельном контексте диалога.
+/// </summary>
 public sealed class AgentTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "Agent";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Spawn a sub-agent to handle a complex task. The sub-agent has its own conversation context and returns a summary when done.";
+
+    /// <summary>
+    /// Указывает, что инструмент безопасен для параллельного выполнения.
+    /// </summary>
     public override bool IsConcurrencySafe => true;
 
+    /// <summary>
+    /// Ограничивает общее число одновременно выполняемых вложенных агентов.
+    /// </summary>
     private static SemaphoreSlim? _slot;
+
+    /// <summary>
+    /// Хранит текущую емкость глобального семафора.
+    /// </summary>
     private static int _slotCapacity;
+
+    /// <summary>
+    /// Содержит количество агентов, ожидающих освобождения слота.
+    /// </summary>
     private static int _queued;
+
+    /// <summary>
+    /// Синхронизирует переинициализацию глобального семафора.
+    /// </summary>
     private static readonly object _slotInitLock = new();
+
+    /// <summary>
+    /// Отслеживает количество активных дочерних агентов для каждой родительской сессии.
+    /// </summary>
     private static readonly ConditionalWeakTable<SessionState, StrongBox<int>> _perParent = new();
 
+    /// <summary>
+    /// Возвращает семафор с требуемой емкостью, создавая его при необходимости.
+    /// </summary>
+    /// <param name="requested">Запрошенное число параллельных слотов.</param>
+    /// <returns>Семафор для ограничения параллелизма.</returns>
     private static SemaphoreSlim EnsureSlot(int requested)
     {
         var capacity = Math.Max(1, requested);
@@ -37,6 +75,10 @@ public sealed class AgentTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("description", "Short description of the task (3-5 words)")
         .AddString("prompt", "Detailed instructions for the sub-agent")
@@ -44,6 +86,11 @@ public sealed class AgentTool : ToolBase
             "general-purpose", "Explore", "Plan", "Coder", "Verify")
         .Require("description", "prompt");
 
+    /// <summary>
+    /// Возвращает набор возможностей, необходимых для запуска дочернего агента.
+    /// </summary>
+    /// <param name="input">JSON с параметрами вызова инструмента.</param>
+    /// <returns>Список требуемых возможностей.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var description = input.TryGetProperty("description", out var d) ? d.GetString() : "task";
@@ -51,6 +98,17 @@ public sealed class AgentTool : ToolBase
         return [new AgentSpawnCap(agentType ?? "general-purpose", description ?? "task")];
     }
 
+    /// <summary>
+    /// Запускает вложенного агента и возвращает сводку по завершении его работы.
+    /// </summary>
+    /// <param name="input">JSON с описанием задачи, промптом и типом агента.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат запуска вложенного агента.</returns>
+    /// <remarks>
+    /// Метод применяет ограничения на глубину вложенности, количество дочерних агентов
+    /// у одного родителя и общий размер очереди ожидания.
+    /// </remarks>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var description = input.GetProperty("description").GetString()!;
@@ -120,9 +178,8 @@ public sealed class AgentTool : ToolBase
 
             var sink = new SubAgentOutputSink(description, context.WriteOutput, context.Output);
             var inputReader = new NullInputReader();
-            // Sub-agents run on a background thread and have no console of their own, so they
-            // must never reach the parent's interactive permission prompt (that deadlocks).
-            // Give them a non-interactive engine that inherits the parent's session approvals.
+            // Дочерний агент работает без собственной консоли, поэтому нельзя допускать,
+            // чтобы он дошел до интерактивного запроса разрешений родителя и завис.
             var childPermissions = context.Permissions.CreateChildEngine(sink, inputReader);
             var llm = new OpenAiCompatClient(context.Config.Llm) { ApiKey = context.Config.Llm.ApiKey };
 
@@ -163,6 +220,12 @@ public sealed class AgentTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Проверяет, разрешен ли инструмент для выбранного типа дочернего агента.
+    /// </summary>
+    /// <param name="toolName">Имя проверяемого инструмента.</param>
+    /// <param name="allowedTools">Список разрешенных шаблонов имен.</param>
+    /// <returns><see langword="true" />, если инструмент разрешен; иначе <see langword="false" />.</returns>
     private static bool IsToolAllowed(string toolName, string[] allowedTools)
     {
         foreach (var entry in allowedTools)

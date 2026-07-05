@@ -4,14 +4,40 @@ using OpenMono.Permissions;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Выполняет поиск по содержимому файлов с помощью ripgrep.
+/// </summary>
 public sealed class GrepTool : ToolBase
 {
+    /// <summary>
+    /// Получает имя инструмента.
+    /// </summary>
     public override string Name => "Grep";
+
+    /// <summary>
+    /// Получает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Search file contents using regex patterns. Uses ripgrep for fast, recursive search.";
+
+    /// <summary>
+    /// Получает признак безопасного параллельного выполнения.
+    /// </summary>
     public override bool IsConcurrencySafe => true;
+
+    /// <summary>
+    /// Получает признак того, что инструмент работает только на чтение.
+    /// </summary>
     public override bool IsReadOnly => true;
+
+    /// <summary>
+    /// Получает уровень разрешений по умолчанию.
+    /// </summary>
     public override PermissionLevel DefaultPermission => PermissionLevel.AutoAllow;
 
+    /// <summary>
+    /// Описывает схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы для параметров поиска.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("pattern", "Regex pattern to search for")
         .AddString("path", "File or directory to search in")
@@ -21,6 +47,11 @@ public sealed class GrepTool : ToolBase
         .AddInteger("max_results", "Maximum number of results (default: 250)")
         .Require("pattern");
 
+    /// <summary>
+    /// Возвращает возможности, необходимые для чтения каталога или файла поиска.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <returns>Список возможностей, требуемых для чтения пути поиска.</returns>
     public IReadOnlyList<Capability> RequiredCapabilities(JsonElement input)
     {
         var searchPath = input.TryGetProperty("path", out var p) ? p.GetString() : ".";
@@ -29,6 +60,16 @@ public sealed class GrepTool : ToolBase
         return [new FileReadCap(searchPath)];
     }
 
+    /// <summary>
+    /// Выполняет поиск по шаблону и формирует структурированный результат.
+    /// </summary>
+    /// <param name="input">JSON-аргументы вызова инструмента.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат поиска с текстовым и структурированным представлением совпадений.</returns>
+    /// <remarks>
+    /// Инструмент дополнительно сохраняет курсор совпадений, чтобы последующие чтения файлов могли использовать найденный набор путей.
+    /// </remarks>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var pattern = input.GetProperty("pattern").GetString()!;
@@ -92,6 +133,7 @@ public sealed class GrepTool : ToolBase
                 string? cursorId = null;
                 if (context.Cursors is not null && matches.Count > 0)
                 {
+                    // Курсор позволяет переиспользовать результаты поиска в последующих чтениях файлов.
                     cursorId = context.Cursors.Store("Grep", new GrepCursorData(matches, fileList));
                 }
 
@@ -114,13 +156,19 @@ public sealed class GrepTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Разбирает вывод ripgrep в структурированный список совпадений.
+    /// </summary>
+    /// <param name="lines">Строки вывода ripgrep.</param>
+    /// <param name="workingDirectory">Рабочий каталог, относительно которого разрешаются пути.</param>
+    /// <returns>Список совпадений с абсолютными путями и номерами строк.</returns>
     private static List<GrepMatch> ParseGrepOutput(IEnumerable<string> lines, string workingDirectory)
     {
         var matches = new List<GrepMatch>();
 
         foreach (var line in lines)
         {
-
+            // Ожидаемый формат ripgrep: путь:строка:содержимое.
             var firstColon = line.IndexOf(':');
             if (firstColon <= 0) continue;
 
@@ -144,6 +192,17 @@ public sealed class GrepTool : ToolBase
     }
 }
 
+/// <summary>
+/// Хранит сериализуемые данные курсора для результатов поиска.
+/// </summary>
+/// <param name="Matches">Список найденных совпадений.</param>
+/// <param name="Files">Список файлов, в которых есть совпадения.</param>
 public sealed record GrepCursorData(IReadOnlyList<GrepMatch> Matches, IReadOnlyList<string> Files);
 
+/// <summary>
+/// Представляет одно совпадение, найденное через ripgrep.
+/// </summary>
+/// <param name="FilePath">Абсолютный путь к файлу с совпадением.</param>
+/// <param name="LineNumber">Номер строки с совпадением.</param>
+/// <param name="Content">Текст строки с совпадением.</param>
 public sealed record GrepMatch(string FilePath, int LineNumber, string Content);

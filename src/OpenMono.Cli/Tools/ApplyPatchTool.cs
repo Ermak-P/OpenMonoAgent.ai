@@ -3,16 +3,37 @@ using System.Text.RegularExpressions;
 
 namespace OpenMono.Tools;
 
+/// <summary>
+/// Применяет unified diff-патч к одному или нескольким существующим файлам.
+/// </summary>
 public sealed partial class ApplyPatchTool : ToolBase
 {
+    /// <summary>
+    /// Возвращает имя инструмента.
+    /// </summary>
     public override string Name => "ApplyPatch";
+
+    /// <summary>
+    /// Возвращает описание назначения инструмента.
+    /// </summary>
     public override string Description => "Apply a unified diff patch to one or more files. Supports standard unified diff format.";
 
+    /// <summary>
+    /// Описывает JSON-схему входных параметров инструмента.
+    /// </summary>
+    /// <returns>Построитель схемы входных данных.</returns>
     protected override SchemaBuilder DefineSchema() => new SchemaBuilder()
         .AddString("patch", "The unified diff patch content")
         .AddBoolean("dry_run", "Preview changes without writing (default: false)")
         .Require("patch");
 
+    /// <summary>
+    /// Разбирает и применяет патч к указанным файлам.
+    /// </summary>
+    /// <param name="input">JSON с телом патча и флагом пробного запуска.</param>
+    /// <param name="context">Контекст выполнения инструмента.</param>
+    /// <param name="ct">Токен отмены операции.</param>
+    /// <returns>Результат применения патча или сообщение об ошибке.</returns>
     protected override async Task<ToolResult> ExecuteCoreAsync(JsonElement input, ToolContext context, CancellationToken ct)
     {
         var patch = input.GetProperty("patch").GetString()!;
@@ -47,6 +68,8 @@ public sealed partial class ApplyPatchTool : ToolBase
                 {
                     var adjustedStart = hunk.StartLine - 1 + offset;
 
+                    // Смещение пересчитывается после каждого предыдущего hunk-а,
+                    // чтобы номера строк оставались корректными в уже измененном буфере.
                     var contextMatch = VerifyContext(modifiedLines, adjustedStart, hunk);
                     if (!contextMatch)
                     {
@@ -86,6 +109,11 @@ public sealed partial class ApplyPatchTool : ToolBase
         }
     }
 
+    /// <summary>
+    /// Разбирает текст unified diff и выделяет из него набор hunk-блоков.
+    /// </summary>
+    /// <param name="patch">Текст патча.</param>
+    /// <returns>Список разобранных hunk-блоков.</returns>
     private static List<PatchHunk> ParsePatch(string patch)
     {
         var hunks = new List<PatchHunk>();
@@ -98,6 +126,8 @@ public sealed partial class ApplyPatchTool : ToolBase
 
             if (line.StartsWith("+++ "))
             {
+                // В стандартном diff путь новой версии часто идет как b/path,
+                // поэтому служебный префикс удаляется.
                 var path = line[4..].TrimStart('b', '/').Trim();
                 currentFile = path;
                 continue;
@@ -127,6 +157,13 @@ public sealed partial class ApplyPatchTool : ToolBase
         return hunks;
     }
 
+    /// <summary>
+    /// Проверяет, совпадает ли контекст hunk-блока с текущим содержимым файла.
+    /// </summary>
+    /// <param name="fileLines">Строки файла, к которому применяется патч.</param>
+    /// <param name="startIndex">Начальный индекс применения в текущем буфере.</param>
+    /// <param name="hunk">Проверяемый hunk-блок.</param>
+    /// <returns><see langword="true" />, если контекст совпадает; иначе <see langword="false" />.</returns>
     private static bool VerifyContext(List<string> fileLines, int startIndex, PatchHunk hunk)
     {
         var fileIdx = startIndex;
@@ -143,6 +180,13 @@ public sealed partial class ApplyPatchTool : ToolBase
         return true;
     }
 
+    /// <summary>
+    /// Применяет один hunk-блок к набору строк.
+    /// </summary>
+    /// <param name="lines">Текущие строки файла.</param>
+    /// <param name="startIndex">Индекс начала применения.</param>
+    /// <param name="hunk">Применяемый hunk-блок.</param>
+    /// <returns>Новый набор строк и количество удаленных и добавленных строк.</returns>
     private static (List<string> Result, int Removed, int Added) ApplyHunk(
         List<string> lines, int startIndex, PatchHunk hunk)
     {
@@ -155,13 +199,13 @@ public sealed partial class ApplyPatchTool : ToolBase
         {
             if (line.StartsWith(' '))
             {
-
+                // Контекстная строка копируется как есть и продвигает обе позиции.
                 result.Add(lines[sourceIdx]);
                 sourceIdx++;
             }
             else if (line.StartsWith('-'))
             {
-
+                // Удаление только пропускает строку источника, не добавляя ее в результат.
                 sourceIdx++;
                 removed++;
             }
@@ -177,13 +221,31 @@ public sealed partial class ApplyPatchTool : ToolBase
         return (result, removed, added);
     }
 
+    /// <summary>
+    /// Возвращает регулярное выражение для разбора заголовка hunk-блока unified diff.
+    /// </summary>
+    /// <returns>Скомпилированное регулярное выражение.</returns>
     [GeneratedRegex(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")]
     private static partial Regex HunkHeaderPattern();
 
+    /// <summary>
+    /// Представляет один блок изменений внутри патча.
+    /// </summary>
     private sealed class PatchHunk
     {
+        /// <summary>
+        /// Возвращает путь к файлу, к которому относится блок.
+        /// </summary>
         public required string FilePath { get; init; }
+
+        /// <summary>
+        /// Возвращает номер стартовой строки в исходном файле.
+        /// </summary>
         public required int StartLine { get; init; }
+
+        /// <summary>
+        /// Возвращает строки блока с префиксами unified diff.
+        /// </summary>
         public List<string> Lines { get; } = [];
     }
 }
